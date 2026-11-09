@@ -1,0 +1,10 @@
+# Optional: Claude Code inside the sandbox. Needs a Node-based BASE_IMAGE (the default).
+FROM safe-task-sandbox:latest
+ARG CLAUDE_CODE_VERSION=2.1.319
+USER root
+# The CLI itself needs its install step; this is the only place install scripts are enabled.
+RUN npm install -g --ignore-scripts=false @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ && apt-get update && apt-get install -y --no-install-recommends ripgrep curl \
+ && rm -rf /var/lib/apt/lists/*
+USER sandbox
+WORKDIR /work/app

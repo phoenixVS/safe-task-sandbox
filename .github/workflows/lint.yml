@@ -1,0 +1,23 @@
+name: lint
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck sandbox.sh scripts/*.sh examples/make-demo-repo.sh
+      - name: compose config is valid
+        run: |
+          cp sandbox.env.example sandbox.env
+          mkdir -p .generated/no-repo
+          printf 'services:\n  gateway:\n    ports:\n      - "127.0.0.1:3000:3000"\n' > .generated/ports.yaml
+          touch .generated/nginx.conf
+          docker compose --env-file sandbox.env -f compose.yaml -f .generated/ports.yaml --profile setup --profile agent config -q
+      - name: build the image and check install hooks are off
+        run: |
+          docker build -t safe-task-sandbox:latest .
+          test "$(docker run --rm safe-task-sandbox:latest npm config get ignore-scripts)" = "true"
+          test "$(docker run --rm safe-task-sandbox:latest id -u)" = "1000"

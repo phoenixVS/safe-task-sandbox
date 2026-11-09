@@ -1,0 +1,111 @@
+# safe-task-sandbox
+#
+#   setup   - has internet: clones the repo and installs dependencies. Two separate runs:
+#             "clone" gets the git token and runs no repo code; "install" never sees the token.
+#   app     - NO internet (internal network). Runs the repo's START_CMD and tests.
+#   gateway - the only bridge: forwards 127.0.0.1:<PORTS> on your machine to the app.
+#   agent   - optional AI coding agent (profile "agent"). HAS internet, see SECURITY.md.
+#
+# Nothing from your machine is mounted except an optional local repo, read-only.
+name: safe-task-sandbox
+
+x-hardened: &hardened
+  build:
+    context: .
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-node:22-bookworm-slim}
+  image: safe-task-sandbox:latest
+  user: "1000:1000"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: ${PIDS_LIMIT:-512}
+  mem_limit: ${MEM_LIMIT:-6g}
+  tmpfs: ["/tmp:size=512m"]
+  volumes:
+    - work:/work
+    - home:/home/sandbox
+    - ${REPO_PATH:-./.generated/no-repo}:/src:ro
+
+services:
+  setup:
+    <<: *hardened
+    profiles: ["setup"]
+    networks: [egress]
+    environment:
+      REPO_URL: ${REPO_URL:-/src}
+      REPO_REF: ${REPO_REF:-}
+      EXPECTED_COMMIT: ${EXPECTED_COMMIT:-}
+      INSTALL_CMD: ${INSTALL_CMD:-}
+      FORCE: ${FORCE:-}
+      # GIT_TOKEN is NOT set here: sandbox.sh passes it only to the clone run (-e GIT_TOKEN).
+    command: ["/opt/sandbox/setup.sh", "install"]
+
+  app:
+    <<: *hardened
+    networks: [isolated]
+    environment:
+      START_CMD: ${START_CMD:-}
+      TEST_CMD: ${TEST_CMD:-}
+    command: ["/opt/sandbox/start.sh"]
+    healthcheck:
+      # The app must listen on 0.0.0.0, not only 127.0.0.1, or the gateway cannot reach it.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${HEALTH_PORT:-3000}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # Optional: Claude Code. Has internet (for the model API) and can reach the app by name (http://app:PORT).
+  # Its login lives in its own volume, not in the app's home volume.
+  agent:
+    <<: *hardened
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.319}
+    image: safe-task-sandbox-agent:latest
+    profiles: ["agent"]
+    networks: [egress, isolated]
+    volumes:
+      - work:/work
+      - agent-home:/home/sandbox
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DISABLE_AUTOUPDATER: "1"
+      # Commits you make with "! git commit" in the agent session carry your identity.
+      # sandbox.sh fills these from your global git config.
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-}
+      GIT_COMMITTER_NAME: ${GIT_AUTHOR_NAME:-}
+      GIT_COMMITTER_EMAIL: ${GIT_AUTHOR_EMAIL:-}
+    working_dir: /work/app
+    stdin_open: true
+    tty: true
+    command: ["claude"]
+
+  gateway:
+    image: nginx:1.27-alpine
+    read_only: true
+    tmpfs: ["/var/cache/nginx", "/var/run", "/tmp"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    networks: [isolated, egress]
+    depends_on: [app]
+    volumes:
+      - ./.generated/nginx.conf:/etc/nginx/nginx.conf:ro
+    # Published ports come from .generated/ports.yaml (written by sandbox.sh from PORTS),
+    # always bound to 127.0.0.1.
+
+networks:
+  isolated:
+    internal: true # no route to the internet or to your machine
+  egress: {}
+
+volumes:
+  work:
+  home:
+  agent-home:
